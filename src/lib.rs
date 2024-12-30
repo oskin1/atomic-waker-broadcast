@@ -17,9 +17,12 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/smol-rs/smol/master/assets/images/logo_fullsize_transparent.png"
 )]
+extern crate alloc;
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::fmt;
+use core::{fmt, mem};
 use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
 use core::task::Waker;
 
@@ -112,7 +115,7 @@ use portable_atomic::AtomicUsize;
 /// ```
 pub struct AtomicWaker {
     state: AtomicUsize,
-    waker: UnsafeCell<Option<Waker>>,
+    wakers: UnsafeCell<Vec<Waker>>,
 }
 
 // `AtomicWaker` is a multi-consumer, single-producer transfer cell. The cell
@@ -228,7 +231,7 @@ impl AtomicWaker {
 
         AtomicWaker {
             state: AtomicUsize::new(WAITING),
-            waker: UnsafeCell::new(None),
+            wakers: UnsafeCell::new(vec![]),
         }
     }
 
@@ -293,9 +296,9 @@ impl AtomicWaker {
                     // Locked acquired, update the waker cell
 
                     // Avoid cloning the waker if the old waker will awaken the same task.
-                    match &*self.waker.get() {
-                        Some(old_waker) if old_waker.will_wake(waker) => (),
-                        _ => *self.waker.get() = Some(waker.clone()),
+                    match &*self.wakers.get() {
+                        wakers if wakers.iter().any(|w| w.will_wake(waker)) => (),
+                        _ => (&mut *self.wakers.get()).push(waker.clone()),
                     }
 
                     // Release the lock. If the state transitioned to include
@@ -329,7 +332,7 @@ impl AtomicWaker {
 
                             // Take the waker to wake once the atomic operation has
                             // completed.
-                            let waker = (*self.waker.get()).take().unwrap();
+                            let wakers = mem::replace(&mut *self.wakers.get(), Vec::new());
 
                             // We need to return to WAITING state (clear our lock and
                             // concurrent WAKING flag). This needs to acquire all
@@ -344,7 +347,9 @@ impl AtomicWaker {
                             //
                             // So we simply schedule to come back later (we could
                             // also simply leave the registration in place above).
-                            waker.wake();
+                            for waker in wakers {
+                                waker.wake();
+                            }
                         }
                     }
                 }
@@ -383,7 +388,7 @@ impl AtomicWaker {
     ///
     /// If `register` has not been called yet, then this does nothing.
     pub fn wake(&self) {
-        if let Some(waker) = self.take() {
+        for waker in self.take() {
             waker.wake();
         }
     }
@@ -396,19 +401,19 @@ impl AtomicWaker {
     /// atomic action.
     ///
     /// If a waker has not been registered, this returns `None`.
-    pub fn take(&self) -> Option<Waker> {
+    pub fn take(&self) -> Vec<Waker> {
         // AcqRel ordering is used in order to acquire the value of the `task`
         // cell as well as to establish a `release` ordering with whatever
         // memory the `AtomicWaker` is associated with.
         match self.state.fetch_or(WAKING, AcqRel) {
             WAITING => {
                 // The waking lock has been acquired.
-                let waker = unsafe { (*self.waker.get()).take() };
+                let wakers = unsafe { mem::replace(&mut *self.wakers.get(), Vec::new()) };
 
                 // Release the lock
                 self.state.fetch_and(!WAKING, Release);
 
-                waker
+                wakers
             }
             state => {
                 // There is a concurrent thread currently updating the
@@ -421,7 +426,7 @@ impl AtomicWaker {
                 debug_assert!(
                     state == REGISTERING || state == REGISTERING | WAKING || state == WAKING
                 );
-                None
+                Vec::new()
             }
         }
     }
