@@ -56,13 +56,13 @@ fn run_lo_hi(c: &mut Criterion, name: &str, f: impl Fn(&AtomicWaker) + Send + Sy
 fn store_and_wake(c: &mut Criterion) {
     run_lo_hi(c, "store and wake", |waker| {
         let noop_waker = noop_waker();
-        waker.register(&noop_waker);
+        waker.try_register(&noop_waker);
         waker.wake();
     });
 
     run_lo_hi(c, "store and take", |waker| {
         let noop_waker = noop_waker();
-        waker.register(&noop_waker);
+        waker.try_register(&noop_waker);
         black_box(waker.take());
     });
 }

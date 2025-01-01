@@ -29,7 +29,7 @@ fn basic() {
                 // Assert we return pending exactly once
                 assert_eq!(0, pending_count);
                 pending_count += 1;
-                atomic_waker_copy.register(cx.waker());
+                atomic_waker_copy.try_register(cx.waker());
 
                 returned_pending_copy.store(1, Ordering::Relaxed);
 
@@ -73,7 +73,7 @@ fn multiple() {
                 // Assert we return pending exactly once
                 assert_eq!(0, pending_count);
                 pending_count += 1;
-                atomic_waker_copy_1.register(cx.waker());
+                atomic_waker_copy_1.try_register(cx.waker());
 
                 returned_pending_copy_1.store(1, Ordering::Relaxed);
 
@@ -92,7 +92,7 @@ fn multiple() {
                 // Assert we return pending exactly once
                 assert_eq!(0, pending_count);
                 pending_count += 1;
-                atomic_waker_copy_2.register(cx.waker());
+                atomic_waker_copy_2.try_register(cx.waker());
 
                 returned_pending_copy_2.store(2, Ordering::Relaxed);
 

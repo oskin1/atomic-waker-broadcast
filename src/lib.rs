@@ -115,7 +115,7 @@ use portable_atomic::AtomicUsize;
 /// ```
 pub struct AtomicWaker {
     state: AtomicUsize,
-    wakers: UnsafeCell<Vec<Waker>>,
+    tasks: UnsafeCell<Vec<Waker>>,
 }
 
 // `AtomicWaker` is a multi-consumer, single-producer transfer cell. The cell
@@ -231,61 +231,26 @@ impl AtomicWaker {
 
         AtomicWaker {
             state: AtomicUsize::new(WAITING),
-            wakers: UnsafeCell::new(vec![]),
+            tasks: UnsafeCell::new(vec![]),
         }
     }
 
     /// Registers the waker to be notified on calls to `wake`.
     ///
     /// The new task will take place of any previous tasks that were registered
-    /// by previous calls to `register`. Any calls to `wake` that happen after
-    /// a call to `register` (as defined by the memory ordering rules), will
-    /// notify the `register` caller's task and deregister the waker from future
-    /// notifications. Because of this, callers should ensure `register` gets
+    /// by previous calls to `try_register`. Any calls to `wake` that happen after
+    /// a call to `try_register` (as defined by the memory ordering rules), will
+    /// notify the `try_register` caller's task and deregister the waker from future
+    /// notifications. Because of this, callers should ensure `try_register` gets
     /// invoked with a new `Waker` **each** time they require a wakeup.
     ///
-    /// It is safe to call `register` with multiple other threads concurrently
-    /// calling `wake`. This will result in the `register` caller's current
+    /// It is safe to call `try_register` with multiple other threads concurrently
+    /// calling `wake`. This will result in the `try_register` caller's current
     /// task being notified once.
     ///
-    /// This function is safe to call concurrently, but this is generally a bad
-    /// idea. Concurrent calls to `register` will attempt to register different
-    /// tasks to be notified. One of the callers will win and have its task set,
-    /// but there is no guarantee as to which caller will succeed.
-    ///
-    /// # Examples
-    ///
-    /// Here is how `register` is used when implementing a flag.
-    ///
-    /// ```
-    /// use futures::future::Future;
-    /// use futures::task::{Context, Poll, AtomicWaker};
-    /// use std::sync::atomic::AtomicBool;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    /// use std::pin::Pin;
-    ///
-    /// struct Flag {
-    ///     waker: AtomicWaker,
-    ///     set: AtomicBool,
-    /// }
-    ///
-    /// impl Future for Flag {
-    ///     type Output = ();
-    ///
-    ///     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-    ///         // Register **before** checking `set` to avoid a race condition
-    ///         // that would result in lost notifications.
-    ///         self.waker.register(cx.waker());
-    ///
-    ///         if self.set.load(Relaxed) {
-    ///             Poll::Ready(())
-    ///         } else {
-    ///             Poll::Pending
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    pub fn register(&self, waker: &Waker) {
+    /// It is also safe to call `try_register` from multiple threads, in this case only one
+    /// call will succeed, while other callers will get `false` returned.
+    pub fn try_register(&self, waker: &Waker) -> bool {
         match self
             .state
             .compare_exchange(WAITING, REGISTERING, Acquire, Acquire)
@@ -296,9 +261,8 @@ impl AtomicWaker {
                     // Locked acquired, update the waker cell
 
                     // Avoid cloning the waker if the old waker will awaken the same task.
-                    match &*self.wakers.get() {
-                        wakers if wakers.iter().any(|w| w.will_wake(waker)) => (),
-                        _ => (&mut *self.wakers.get()).push(waker.clone()),
+                    if !(&*self.tasks.get()).iter().any(|w| w.will_wake(waker)) {
+                        (&mut *self.tasks.get()).push(waker.clone())
                     }
 
                     // Release the lock. If the state transitioned to include
@@ -332,7 +296,7 @@ impl AtomicWaker {
 
                             // Take the waker to wake once the atomic operation has
                             // completed.
-                            let wakers = mem::replace(&mut *self.wakers.get(), Vec::new());
+                            let wakers = mem::replace(&mut *self.tasks.get(), Vec::new());
 
                             // We need to return to WAITING state (clear our lock and
                             // concurrent WAKING flag). This needs to acquire all
@@ -380,8 +344,10 @@ impl AtomicWaker {
                 // We just want to maintain memory safety. It is ok to drop the
                 // call to `register`.
                 debug_assert!(state == REGISTERING || state == REGISTERING | WAKING);
+                return false;
             }
         }
+        true
     }
 
     /// Calls `wake` on the last `Waker` passed to `register`.
@@ -408,12 +374,12 @@ impl AtomicWaker {
         match self.state.fetch_or(WAKING, AcqRel) {
             WAITING => {
                 // The waking lock has been acquired.
-                let wakers = unsafe { mem::replace(&mut *self.wakers.get(), Vec::new()) };
+                let tasks = unsafe { mem::replace(&mut *self.tasks.get(), Vec::new()) };
 
                 // Release the lock
                 self.state.fetch_and(!WAKING, Release);
 
-                wakers
+                tasks
             }
             state => {
                 // There is a concurrent thread currently updating the
